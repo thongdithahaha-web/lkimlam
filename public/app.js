@@ -13,7 +13,6 @@ const resultSection   = document.getElementById('result-section');
 const errorToast      = document.getElementById('error-toast');
 const errorMsg        = document.getElementById('error-message');
 const toastClose      = document.getElementById('toast-close');
-const downloadMp3Btn  = document.getElementById('download-mp3-btn');
 
 // Result elements
 const elArtwork      = document.getElementById('result-artwork');
@@ -140,10 +139,17 @@ urlInput.addEventListener('input', () => {
 // ── Fetch button ──────────────────────────────────────────
 fetchBtn.addEventListener('click', triggerFetch);
 
+const searchBoxEl     = document.getElementById('search-box');
+
 async function triggerFetch() {
   let url = urlInput.value.trim();
   if (!url) {
-    showError('Vui lòng nhập hoặc dán link SoundCloud.');
+    if (searchBoxEl) {
+      searchBoxEl.classList.remove('shake');
+      void searchBoxEl.offsetWidth; // trigger reflow
+      searchBoxEl.classList.add('shake');
+    }
+    showError('Vui lòng nhập hoặc dán link bài hát SoundCloud.');
     urlInput.focus();
     return;
   }
@@ -152,6 +158,11 @@ async function triggerFetch() {
     urlInput.value = url;
   }
   if (!isSoundCloudUrl(url)) {
+    if (searchBoxEl) {
+      searchBoxEl.classList.remove('shake');
+      void searchBoxEl.offsetWidth;
+      searchBoxEl.classList.add('shake');
+    }
     showError('Link không hợp lệ. Vui lòng dùng link từ soundcloud.com.');
     return;
   }
