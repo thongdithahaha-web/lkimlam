@@ -450,77 +450,49 @@ function formatAudioSeconds(sec) {
 
 // ── Download ──────────────────────────────────────────────
 downloadMp3Btn.addEventListener('click', () => {
-  if (!currentTrack?.streamData) {
-    showError('Không có nguồn âm thanh để tải.');
+  if (!currentTrack) {
+    showError('Vui lòng tìm bài hát trước khi tải.');
     return;
   }
   startDownload(currentTrack);
 });
 
-async function startDownload(track) {
-  const { url, protocol } = track.streamData;
-  const filename = sanitizeFilename(`${track.artist} - ${track.title}`);
+function startDownload(track) {
+  const filename = sanitizeFilename(`${track.artist || 'Artist'} - ${track.title || 'Track'}`);
 
   downloadMp3Btn.disabled = true;
   progressWrap.style.display = 'flex';
-  animateProgress();
-  setProgressLabel('Đang kết nối...');
+  setProgressLabel('Đang chuẩn bị file tải xuống...');
+  progressFill.style.width = '35%';
 
-  try {
-    const downloadUrl =
-      `/api/download?url=${encodeURIComponent(url)}` +
-      `&filename=${encodeURIComponent(filename)}` +
-      `&protocol=${protocol || 'progressive'}`;
+  // Sử dụng track.permalink để backend luôn lấy stream tươi mới không bao giờ bị 403
+  const downloadUrl = `/api/download?trackUrl=${encodeURIComponent(track.permalink || '')}` +
+    `&filename=${encodeURIComponent(filename)}` +
+    `&protocol=${track.streamData?.protocol || 'hls'}`;
 
-    setProgressLabel('Đang tải xuống...');
+  // Kích hoạt tải xuống trực tiếp thông qua trình duyệt native
+  const a = document.createElement('a');
+  a.href = downloadUrl;
+  a.setAttribute('download', `${filename}.mp3`);
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 
-    const res = await fetch(downloadUrl);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Lỗi khi tải file');
-    }
+  setTimeout(() => {
+    progressFill.style.width = '85%';
+    setProgressLabel('Trình duyệt đang tải file về máy...');
+  }, 1000);
 
-    setProgressLabel('Đang xử lý file...');
-    progressFill.style.width = '80%';
-
-    const blob = await res.blob();
+  setTimeout(() => {
     progressFill.style.width = '100%';
-    setProgressLabel('Hoàn thành! Đang mở hộp thoại lưu...');
+    setProgressLabel('Đã bắt đầu tải xuống thành công!');
+  }, 2200);
 
-    // Trigger browser download
-    const a    = document.createElement('a');
-    a.href     = URL.createObjectURL(blob);
-    a.download = `${filename}.mp3`;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-
-    setTimeout(() => {
-      progressWrap.style.display = 'none';
-      progressFill.style.width   = '0%';
-      downloadMp3Btn.disabled    = false;
-      setProgressLabel('Đang chuẩn bị...');
-    }, 3000);
-  } catch (err) {
-    showError('Tải thất bại: ' + err.message);
+  setTimeout(() => {
     progressWrap.style.display = 'none';
-    downloadMp3Btn.disabled    = false;
-  }
-}
-
-let progressInterval = null;
-
-function animateProgress() {
-  if (progressInterval) clearInterval(progressInterval);
-  let v = 0;
-  progressInterval = setInterval(() => {
-    if (v >= 70) { clearInterval(progressInterval); return; }
-    v += Math.random() * 4;
-    if (v > 70) v = 70;
-    progressFill.style.width = v + '%';
-  }, 300);
+    progressFill.style.width = '0%';
+    downloadMp3Btn.disabled = false;
+  }, 4500);
 }
 
 function setProgressLabel(text) {
