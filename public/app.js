@@ -17,6 +17,9 @@ const downloadMp3Btn  = document.getElementById('download-mp3-btn');
 
 // Result elements
 const elArtwork      = document.getElementById('result-artwork');
+const elArtworkWrap  = document.getElementById('artwork-wrap');
+const elArtworkPlayIcon = document.getElementById('artwork-play-icon');
+const elArtworkPauseIcon = document.getElementById('artwork-pause-icon');
 const elTitle        = document.getElementById('result-title');
 const elArtistName   = document.getElementById('result-artist-name');
 const elArtist       = document.getElementById('result-artist');
@@ -25,8 +28,31 @@ const elGenre        = document.getElementById('result-genre');
 const elPlays        = document.getElementById('result-plays');
 const elLikes        = document.getElementById('result-likes');
 const elScLink       = document.getElementById('soundcloud-link');
+
+// Audio Player elements
 const audioPreview   = document.getElementById('audio-preview');
 const audioPlayer    = document.getElementById('audio-player');
+const playerMainBtn  = document.getElementById('player-main-btn');
+const ctrlPlayIcon   = document.getElementById('ctrl-play-icon');
+const ctrlPauseIcon  = document.getElementById('ctrl-pause-icon');
+const playerCurrentTime = document.getElementById('player-current-time');
+const playerTotalTime   = document.getElementById('player-total-time');
+const soundWaveAnim     = document.getElementById('sound-wave-anim');
+const progressContainer = document.getElementById('player-progress-container');
+const playerProgressFill = document.getElementById('player-progress-fill');
+const playerProgressThumb = document.getElementById('player-progress-thumb');
+const volumeToggleBtn   = document.getElementById('volume-toggle-btn');
+const volHighIcon       = document.getElementById('vol-high-icon');
+const volMuteIcon       = document.getElementById('vol-mute-icon');
+const volumeSlider      = document.getElementById('volume-slider');
+
+// Action buttons
+const previewBtn        = document.getElementById('preview-btn');
+const previewBtnPlayIcon = document.getElementById('preview-btn-play-icon');
+const previewBtnPauseIcon = document.getElementById('preview-btn-pause-icon');
+const previewBtnText    = document.getElementById('preview-btn-text');
+const downloadMp3Btn    = document.getElementById('download-mp3-btn');
+
 const progressWrap   = document.getElementById('progress-wrap');
 const progressFill   = document.getElementById('progress-fill');
 const progressLabel  = document.getElementById('progress-label');
@@ -34,6 +60,8 @@ const progressLabel  = document.getElementById('progress-label');
 // ── State ─────────────────────────────────────────────────
 let currentTrack = null;
 let toastTimer   = null;
+let hlsPlayer    = null;
+let isAudioPlaying = false;
 
 // ── Particles Canvas ──────────────────────────────────────
 (function initParticles() {
@@ -166,6 +194,13 @@ async function fetchTrack(url) {
 function renderResult(track) {
   document.title = `${track.title} – lkimlamdev`;
 
+  // Dừng bài hát trước đó nếu đang phát
+  pauseAudio();
+  if (hlsPlayer) {
+    hlsPlayer.destroy();
+    hlsPlayer = null;
+  }
+
   // Artwork
   elArtwork.src = track.artwork || 'data:image/svg+xml,' + encodeURIComponent(
     `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
@@ -188,12 +223,19 @@ function renderResult(track) {
   elArtist.href              = track.artistUrl     || '#';
   elScLink.href              = track.permalink     || '#';
 
-  // Audio preview
+  playerTotalTime.textContent = track.duration      || '0:00';
+  playerCurrentTime.textContent = '0:00';
+  playerProgressFill.style.width = '0%';
+  playerProgressThumb.style.left = '0%';
+
+  // Cấu hình nguồn phát nhạc preview
   if (track.streamData?.url) {
-    audioPlayer.src = track.streamData.url;
+    setupAudioStream(track.streamData);
     audioPreview.style.display = 'block';
+    previewBtn.style.display = 'inline-flex';
   } else {
     audioPreview.style.display = 'none';
+    previewBtn.style.display = 'none';
     audioPlayer.src = '';
   }
 
@@ -201,6 +243,198 @@ function renderResult(track) {
   downloadMp3Btn.disabled = !track.streamData;
   progressWrap.style.display = 'none';
   progressFill.style.width   = '0%';
+}
+
+// ── Setup Audio Stream (HLS or Progressive) ───────────────
+function setupAudioStream(streamData) {
+  const { url, protocol } = streamData;
+
+  if (protocol === 'hls') {
+    if (window.Hls && Hls.isSupported()) {
+      hlsPlayer = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+      });
+      hlsPlayer.loadSource(url);
+      hlsPlayer.attachMedia(audioPlayer);
+      hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          console.warn('HLS fatal error, fallback to proxy stream', data);
+          audioPlayer.src = `/api/stream?url=${encodeURIComponent(url)}&protocol=hls`;
+        }
+      });
+    } else if (audioPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari / iOS Native HLS
+      audioPlayer.src = url;
+    } else {
+      // Fallback endpoint proxy
+      audioPlayer.src = `/api/stream?url=${encodeURIComponent(url)}&protocol=hls`;
+    }
+  } else {
+    // Progressive MP3
+    audioPlayer.src = url;
+  }
+}
+
+// ── Audio Controls & Sync UI ──────────────────────────────
+function toggleAudio() {
+  if (!currentTrack?.streamData) {
+    showError('Không tìm thấy nguồn âm thanh.');
+    return;
+  }
+
+  if (isAudioPlaying) {
+    pauseAudio();
+  } else {
+    playAudio();
+  }
+}
+
+function playAudio() {
+  audioPlayer.play().then(() => {
+    isAudioPlaying = true;
+    updateAudioUI(true);
+  }).catch((err) => {
+    console.error('Lỗi phát nhạc:', err);
+    // Nếu link trực tiếp bị chặn CORS, thử fallback qua API backend stream
+    if (currentTrack?.streamData?.url) {
+      const fallbackUrl = `/api/stream?url=${encodeURIComponent(currentTrack.streamData.url)}&protocol=${currentTrack.streamData.protocol || 'progressive'}`;
+      if (audioPlayer.src !== fallbackUrl) {
+        audioPlayer.src = fallbackUrl;
+        audioPlayer.play().then(() => {
+          isAudioPlaying = true;
+          updateAudioUI(true);
+        }).catch((e) => showError('Không thể phát trước bài hát này: ' + e.message));
+        return;
+      }
+    }
+    showError('Không thể phát trước bài hát: ' + err.message);
+  });
+}
+
+function pauseAudio() {
+  audioPlayer.pause();
+  isAudioPlaying = false;
+  updateAudioUI(false);
+}
+
+function updateAudioUI(playing) {
+  // Đồng bộ Artwork
+  if (playing) {
+    elArtworkWrap?.classList.add('is-playing');
+    elArtworkPlayIcon.style.display = 'none';
+    elArtworkPauseIcon.style.display = 'block';
+  } else {
+    elArtworkWrap?.classList.remove('is-playing');
+    elArtworkPlayIcon.style.display = 'block';
+    elArtworkPauseIcon.style.display = 'none';
+  }
+
+  // Đồng bộ Player controls
+  if (playing) {
+    ctrlPlayIcon.style.display = 'none';
+    ctrlPauseIcon.style.display = 'block';
+    soundWaveAnim?.classList.add('is-playing');
+  } else {
+    ctrlPlayIcon.style.display = 'block';
+    ctrlPauseIcon.style.display = 'none';
+    soundWaveAnim?.classList.remove('is-playing');
+  }
+
+  // Đồng bộ Action button "Nghe trước"
+  if (playing) {
+    previewBtn?.classList.add('is-playing');
+    previewBtnPlayIcon.style.display = 'none';
+    previewBtnPauseIcon.style.display = 'block';
+    previewBtnText.textContent = 'Tạm dừng';
+  } else {
+    previewBtn?.classList.remove('is-playing');
+    previewBtnPlayIcon.style.display = 'block';
+    previewBtnPauseIcon.style.display = 'none';
+    previewBtnText.textContent = 'Nghe trước';
+  }
+}
+
+// Bấm vào Artwork để play/pause
+elArtworkWrap?.addEventListener('click', toggleAudio);
+
+// Bấm nút Play/Pause trên Player
+playerMainBtn?.addEventListener('click', toggleAudio);
+
+// Bấm nút "Nghe trước"
+previewBtn?.addEventListener('click', toggleAudio);
+
+// Cập nhật tiến trình phát nhạc
+audioPlayer.addEventListener('timeupdate', () => {
+  if (!audioPlayer.duration || isNaN(audioPlayer.duration)) return;
+
+  const current = audioPlayer.currentTime;
+  const total = audioPlayer.duration;
+  playerCurrentTime.textContent = formatAudioSeconds(current);
+
+  const pct = (current / total) * 100;
+  playerProgressFill.style.width = pct + '%';
+  playerProgressThumb.style.left = pct + '%';
+});
+
+// Khi tải xong metadata bài hát
+audioPlayer.addEventListener('loadedmetadata', () => {
+  if (audioPlayer.duration && !isNaN(audioPlayer.duration)) {
+    playerTotalTime.textContent = formatAudioSeconds(audioPlayer.duration);
+  }
+});
+
+// Khi bài hát phát hết
+audioPlayer.addEventListener('ended', () => {
+  isAudioPlaying = false;
+  updateAudioUI(false);
+  playerProgressFill.style.width = '0%';
+  playerProgressThumb.style.left = '0%';
+  playerCurrentTime.textContent = '0:00';
+});
+
+// Tua bài hát khi click vào timeline
+progressContainer?.addEventListener('click', (e) => {
+  if (!audioPlayer.duration || isNaN(audioPlayer.duration)) return;
+  const rect = progressContainer.getBoundingClientRect();
+  const clickX = e.clientX - rect.left;
+  const pct = Math.max(0, Math.min(1, clickX / rect.width));
+  audioPlayer.currentTime = pct * audioPlayer.duration;
+  playerProgressFill.style.width = (pct * 100) + '%';
+  playerProgressThumb.style.left = (pct * 100) + '%';
+});
+
+// Điều khiển Volume
+volumeSlider?.addEventListener('input', (e) => {
+  const val = parseFloat(e.target.value);
+  audioPlayer.volume = val;
+  audioPlayer.muted = (val === 0);
+  updateVolumeUI(val > 0);
+});
+
+volumeToggleBtn?.addEventListener('click', () => {
+  audioPlayer.muted = !audioPlayer.muted;
+  if (audioPlayer.muted) {
+    updateVolumeUI(false);
+  } else {
+    updateVolumeUI(audioPlayer.volume > 0);
+  }
+});
+
+function updateVolumeUI(hasSound) {
+  if (hasSound) {
+    volHighIcon.style.display = 'block';
+    volMuteIcon.style.display = 'none';
+  } else {
+    volHighIcon.style.display = 'none';
+    volMuteIcon.style.display = 'block';
+  }
+}
+
+function formatAudioSeconds(sec) {
+  const s = Math.floor(sec || 0);
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
 // ── Download ──────────────────────────────────────────────

@@ -144,6 +144,56 @@ app.get('/api/track', async (req, res) => {
   }
 });
 
+// ─── API: Stream Audio để nghe thử ──────────────────────────────────────────
+app.get('/api/stream', async (req, res) => {
+  const { url, protocol } = req.query;
+  if (!url) return res.status(400).json({ error: 'Thiếu URL' });
+
+  try {
+    if (protocol === 'hls') {
+      const { data: m3u8 } = await axios.get(url, { timeout: 10000 });
+      const segments = m3u8.split('\n').filter((l) => l.trim() && !l.startsWith('#'));
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      for (const seg of segments) {
+        if (res.writableEnded || res.destroyed) break;
+        try {
+          const { data: buf } = await axios.get(seg.trim(), {
+            responseType: 'arraybuffer',
+            timeout: 10000,
+          });
+          res.write(Buffer.from(buf));
+        } catch (_) {}
+      }
+      return res.end();
+    }
+
+    const headers = {};
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range;
+    }
+
+    const response = await axios.get(url, {
+      responseType: 'stream',
+      headers,
+      timeout: 30000,
+    });
+
+    res.status(response.status);
+    if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
+    if (response.headers['accept-ranges']) res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
+    if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
+    res.setHeader('Content-Type', response.headers['content-type'] || 'audio/mpeg');
+
+    response.data.pipe(res);
+  } catch (err) {
+    console.error('❌ /api/stream:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: 'Lỗi stream: ' + err.message });
+  }
+});
+
 // ─── API: Tải xuống ───────────────────────────────────────────────────────────
 app.get('/api/download', async (req, res) => {
   const { url, filename, protocol } = req.query;
