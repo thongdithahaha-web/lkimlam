@@ -10,19 +10,28 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
+// ─── Fallback Client IDs ──────────────────────────────────────────────────────
+const FALLBACK_CLIENT_IDS = [
+  '39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ',
+  'a3dd183a3579db9a34fb59c160b2244f',
+  '2t9loNfh0ekOfbnfq6VJYWeAOdtDensity',
+  'b45b1f107e7924e1279d0f98adb8b74e',
+  'iZIs9mchVcX5lhVR1hnZWMM9nx44Huao',
+];
+
 // ─── Client ID Cache ──────────────────────────────────────────────────────────
 let cachedClientId = null;
 let clientIdTimestamp = 0;
 const CLIENT_ID_TTL = 3600000; // 1 giờ
 
 async function fetchClientId() {
-  try {
-    const headers = {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    };
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  };
 
+  try {
     const response = await axios.get('https://soundcloud.com', { headers, timeout: 15000 });
     const html = response.data;
 
@@ -50,9 +59,19 @@ async function fetchClientId() {
       } catch (_) {}
     }
   } catch (err) {
-    console.error('❌ Lỗi fetchClientId:', err.message);
+    console.warn('⚠️ Lỗi fetchClientId động:', err.message);
   }
-  return null;
+
+  // Sử dụng fallback nếu không tìm thấy
+  for (const fallbackId of FALLBACK_CLIENT_IDS) {
+    try {
+      await axios.get(`https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com&client_id=${fallbackId}`, { timeout: 5000 });
+      console.log('✅ Dùng fallback client_id:', fallbackId);
+      return fallbackId;
+    } catch (_) {}
+  }
+
+  return FALLBACK_CLIENT_IDS[0];
 }
 
 async function getClientId() {
@@ -76,16 +95,63 @@ function formatCount(n) {
   return String(n);
 }
 
-// ─── API: Lấy thông tin bài hát ──────────────────────────────────────────────
-app.get('/api/track', async (req, res) => {
-  const { url } = req.query;
-  if (!url || !url.includes('soundcloud.com')) {
-    return res.status(400).json({ error: 'URL SoundCloud không hợp lệ' });
+// Unshorten link SoundCloud dạng on.soundcloud.com hoặc thiếu https://
+async function expandUrl(rawUrl) {
+  let url = rawUrl.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    url = 'https://' + url;
   }
 
   try {
+    const res = await axios.get(url, {
+      maxRedirects: 5,
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    return res.request.res.responseUrl || url;
+  } catch (e) {
+    return url;
+  }
+}
+
+// Trích xuất các segment MP3 từ m3u8
+async function parseHlsSegments(m3u8Url) {
+  const { data: m3u8 } = await axios.get(m3u8Url, { timeout: 10000 });
+  const lines = m3u8.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  // Kiểm tra nếu là master playlist
+  const variant = lines.find((l) => !l.startsWith('#') && l.includes('.m3u8'));
+  if (variant) {
+    const nextUrl = new URL(variant, m3u8Url).href;
+    return parseHlsSegments(nextUrl);
+  }
+
+  const segments = lines
+    .filter((l) => !l.startsWith('#'))
+    .map((seg) => new URL(seg, m3u8Url).href);
+
+  return segments;
+}
+
+// ─── API: Lấy thông tin bài hát ──────────────────────────────────────────────
+app.get('/api/track', async (req, res) => {
+  let { url } = req.query;
+  if (!url) {
+    return res.status(400).json({ error: 'Vui lòng cung cấp URL bài hát.' });
+  }
+
+  try {
+    // Mở rộng URL nếu là dạng rút gọn on.soundcloud.com
+    url = await expandUrl(url);
+
+    if (!url.includes('soundcloud.com')) {
+      return res.status(400).json({ error: 'URL không hợp lệ. Vui lòng nhập link bài hát từ soundcloud.com.' });
+    }
+
     const clientId = await getClientId();
-    if (!clientId) return res.status(500).json({ error: 'Không thể lấy thông tin xác thực từ SoundCloud' });
+    if (!clientId) return res.status(500).json({ error: 'Không thể kết nối với dịch vụ SoundCloud.' });
 
     const { data: track } = await axios.get(
       `https://api-v2.soundcloud.com/resolve?url=${encodeURIComponent(url)}&client_id=${clientId}`,
@@ -104,20 +170,24 @@ app.get('/api/track', async (req, res) => {
     const hls = transcodings.find(
       (t) => t.format?.protocol === 'hls' && t.format?.mime_type === 'audio/mpeg'
     );
-    const fallback = transcodings.find((t) => t.format?.protocol === 'progressive');
-    const preferred = progressive || fallback || hls;
+    const fallback = transcodings.find((t) => t.format?.protocol === 'progressive') || transcodings[0];
+    const preferred = progressive || hls || fallback;
 
     let streamData = null;
     if (preferred) {
-      const { data: streamInfo } = await axios.get(
-        `${preferred.url}?client_id=${clientId}`,
-        { timeout: 10000 }
-      );
-      streamData = {
-        url: streamInfo.url,
-        protocol: preferred.format?.protocol,
-        mimeType: preferred.format?.mime_type,
-      };
+      try {
+        const { data: streamInfo } = await axios.get(
+          `${preferred.url}?client_id=${clientId}`,
+          { timeout: 10000 }
+        );
+        streamData = {
+          url: streamInfo.url,
+          protocol: preferred.format?.protocol || 'progressive',
+          mimeType: preferred.format?.mime_type || 'audio/mpeg',
+        };
+      } catch (streamErr) {
+        console.warn('Lỗi lấy streamInfo:', streamErr.message);
+      }
     }
 
     const artwork =
@@ -131,7 +201,7 @@ app.get('/api/track', async (req, res) => {
       artwork,
       duration: formatDuration(track.duration),
       durationMs: track.duration,
-      genre: track.genre || 'Không rõ',
+      genre: track.genre || 'SoundCloud',
       plays: formatCount(track.playback_count),
       likes: formatCount(track.likes_count),
       streamData,
@@ -139,7 +209,7 @@ app.get('/api/track', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ /api/track:', err.message);
-    if (err.response?.status === 404) return res.status(404).json({ error: 'Không tìm thấy bài hát' });
+    if (err.response?.status === 404) return res.status(404).json({ error: 'Không tìm thấy bài hát. Có thể bài hát ở chế độ riêng tư hoặc bị giới hạn quốc gia.' });
     return res.status(500).json({ error: 'Lỗi máy chủ: ' + err.message });
   }
 });
@@ -149,21 +219,24 @@ app.get('/api/stream', async (req, res) => {
   const { url, protocol } = req.query;
   if (!url) return res.status(400).json({ error: 'Thiếu URL' });
 
+  let isClosed = false;
+  req.on('close', () => { isClosed = true; });
+
   try {
     if (protocol === 'hls') {
-      const { data: m3u8 } = await axios.get(url, { timeout: 10000 });
-      const segments = m3u8.split('\n').filter((l) => l.trim() && !l.startsWith('#'));
+      const segments = await parseHlsSegments(url);
 
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Cache-Control', 'no-cache');
 
       for (const seg of segments) {
-        if (res.writableEnded || res.destroyed) break;
+        if (isClosed || res.writableEnded || res.destroyed) break;
         try {
-          const { data: buf } = await axios.get(seg.trim(), {
+          const { data: buf } = await axios.get(seg, {
             responseType: 'arraybuffer',
             timeout: 10000,
           });
+          if (isClosed) break;
           res.write(Buffer.from(buf));
         } catch (_) {}
       }
@@ -199,23 +272,31 @@ app.get('/api/download', async (req, res) => {
   const { url, filename, protocol } = req.query;
   if (!url) return res.status(400).json({ error: 'Thiếu URL' });
 
-  const safeName = (filename || 'audio').replace(/[<>:"/\\|?*]/g, '_');
+  // Tên file an toàn cho cả header ASCII và UTF-8
+  const cleanName = (filename || 'lkimlamdev_soundcloud').replace(/[<>:"/\\|?*]/g, '_').trim();
+  const asciiName = cleanName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7E]/g, '_') || 'audio';
+
+  let isClosed = false;
+  req.on('close', () => { isClosed = true; });
 
   try {
     if (protocol === 'hls') {
-      // HLS: tải từng segment và ghép lại
-      const { data: m3u8 } = await axios.get(url, { timeout: 10000 });
-      const segments = m3u8.split('\n').filter((l) => l.trim() && !l.startsWith('#'));
+      const segments = await parseHlsSegments(url);
 
       res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.mp3"`);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${asciiName}.mp3"; filename*=UTF-8''${encodeURIComponent(cleanName)}.mp3`
+      );
 
       for (const seg of segments) {
+        if (isClosed || res.writableEnded || res.destroyed) break;
         try {
-          const { data: buf } = await axios.get(seg.trim(), {
+          const { data: buf } = await axios.get(seg, {
             responseType: 'arraybuffer',
             timeout: 10000,
           });
+          if (isClosed) break;
           res.write(Buffer.from(buf));
         } catch (_) {}
       }
@@ -232,11 +313,15 @@ app.get('/api/download', async (req, res) => {
 
     res.setHeader('Content-Type', response.headers['content-type'] || 'audio/mpeg');
     if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.mp3"`);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiName}.mp3"; filename*=UTF-8''${encodeURIComponent(cleanName)}.mp3`
+    );
+
     response.data.pipe(res);
   } catch (err) {
     console.error('❌ /api/download:', err.message);
-    if (!res.headersSent) res.status(500).json({ error: 'Lỗi khi tải: ' + err.message });
+    if (!res.headersSent) res.status(500).json({ error: 'Lỗi khi tải bài hát: ' + err.message });
   }
 });
 

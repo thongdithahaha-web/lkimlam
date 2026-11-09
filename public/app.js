@@ -141,11 +141,15 @@ urlInput.addEventListener('input', () => {
 fetchBtn.addEventListener('click', triggerFetch);
 
 async function triggerFetch() {
-  const url = urlInput.value.trim();
+  let url = urlInput.value.trim();
   if (!url) {
     showError('Vui lòng nhập hoặc dán link SoundCloud.');
     urlInput.focus();
     return;
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    url = 'https://' + url;
+    urlInput.value = url;
   }
   if (!isSoundCloudUrl(url)) {
     showError('Link không hợp lệ. Vui lòng dùng link từ soundcloud.com.');
@@ -155,10 +159,16 @@ async function triggerFetch() {
 }
 
 // ── Validate SoundCloud URL ───────────────────────────────
-function isSoundCloudUrl(url) {
+function isSoundCloudUrl(rawUrl) {
+  let url = (rawUrl || '').trim();
+  if (!url) return false;
+  if (!/^https?:\/\//i.test(url)) {
+    url = 'https://' + url;
+  }
   try {
     const u = new URL(url);
-    return u.hostname === 'soundcloud.com' || u.hostname.endsWith('.soundcloud.com');
+    const host = u.hostname.toLowerCase();
+    return host === 'soundcloud.com' || host.endsWith('.soundcloud.com');
   } catch {
     return false;
   }
@@ -278,8 +288,9 @@ function setupAudioStream(streamData) {
 
 // ── Audio Controls & Sync UI ──────────────────────────────
 function toggleAudio() {
-  if (!currentTrack?.streamData) {
-    showError('Không tìm thấy nguồn âm thanh.');
+  if (!currentTrack) return;
+  if (!currentTrack.streamData) {
+    showError('Không tìm thấy nguồn âm thanh cho bài hát này.');
     return;
   }
 
